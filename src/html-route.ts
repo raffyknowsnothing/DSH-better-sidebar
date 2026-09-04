@@ -9,14 +9,18 @@
  * Encoding everything into the URL path keeps relative resolution inside
  * the same route with every request self-contained:
  *
- *   /sidebar/html/<sessionId>/<absolute-path segments, encodeURIComponent'd>
- *   /sidebar/html/S/Users/me/proj/index.html
- *     + ./style.css → /sidebar/html/S/Users/me/proj/style.css
- *   Windows: C:\Users\me\a.html → /sidebar/html/S/C%3A/Users/me/a.html
+ *   /sidebar/html/<ticket>/<sessionId>/<absolute-path segments, encodeURIComponent'd>
+ *   /sidebar/html/T/S/Users/me/proj/index.html
+ *     + ./style.css → /sidebar/html/T/S/Users/me/proj/style.css
+ *   Windows: C:\Users\me\a.html → /sidebar/html/T/S/C%3A/Users/me/a.html
  *   UNC (\\server\share\... or //server/share/...):
- *     → /sidebar/html/S//server/share/proj/a.html  ('//' right after the
+ *     → /sidebar/html/T/S//server/share/proj/a.html  ('//' right after the
  *       sessionId marks the UNC prefix; the WHATWG URL keeps '//' intact so
  *       relative assets still resolve inside the same route)
+ *
+ * The leading ticket segment is the route's proof of origin (html-ticket.ts).
+ * It rides in the path for the same reason the rest does: a relative asset
+ * must carry it without the page knowing it exists.
  *
  * The decoder rebuilds the marker as a forward-slash `//server/share/...`
  * path. That form is intentionally platform-neutral: `node:path` resolves it
@@ -33,6 +37,8 @@
 
 /** One decoded route reference. */
 export interface HtmlRouteRef {
+  /** The preview ticket the URL carried; the host validates it (html-ticket.ts). */
+  ticket: string
   sessionId: string
   /** Absolute file path (leading slash; Windows drives keep their colon). */
   path: string
@@ -47,18 +53,20 @@ export type HtmlDecodeResult =
 export const HTML_ROUTE_PREFIX = '/sidebar/html/'
 
 /** Build the route URL for one absolute file path (client + tests). */
-export function encodeHtmlUrl(sessionId: string, path: string): string {
+export function encodeHtmlUrl(ticket: string, sessionId: string, path: string): string {
   const unc = /^[\\/]{2}[^\\/]/.test(path)
   const segments = path.split(/[\\/]+/).filter(segment => segment !== '')
-  return `${HTML_ROUTE_PREFIX}${encodeURIComponent(sessionId)}/${unc ? '/' : ''}${segments.map(encodeURIComponent).join('/')}`
+  return `${HTML_ROUTE_PREFIX}${encodeURIComponent(ticket)}/${encodeURIComponent(sessionId)}/${unc ? '/' : ''}${segments.map(encodeURIComponent).join('/')}`
 }
 
 /**
- * Decode a route pathname into the session + absolute file path. Rejects
- * a wrong prefix (404), an empty path, malformed percent encoding, and a
- * missing sessionId or file path (400). The caller still must bound the
- * decoded path with the workspace real-path guard — a decoded `..`
- * segment resolves outside the cwd and is refused there.
+ * Decode a route pathname into the ticket, session and absolute file path.
+ * Rejects a wrong prefix (404), an empty path, malformed percent encoding,
+ * and a missing ticket, sessionId or file path (400). Decoding proves
+ * nothing on its own: the caller must still validate the ticket against
+ * this run's value and bound the decoded path with the workspace real-path
+ * guard — a decoded `..` segment resolves outside the cwd and is refused
+ * there.
  */
 export function decodeHtmlUrl(pathname: string): HtmlDecodeResult {
   if (!pathname.startsWith(HTML_ROUTE_PREFIX)) {
@@ -74,9 +82,12 @@ export function decodeHtmlUrl(pathname: string): HtmlDecodeResult {
   } catch {
     return { ok: false, status: 400, message: 'malformed URL encoding' }
   }
-  const [sessionId, ...pathSegments] = segments
+  const [ticket, sessionId, ...pathSegments] = segments
+  if (ticket === undefined || ticket === '') {
+    return { ok: false, status: 400, message: 'ticket, sessionId and file path are required' }
+  }
   if (sessionId === undefined || sessionId === '') {
-    return { ok: false, status: 400, message: 'sessionId and file path are required' }
+    return { ok: false, status: 400, message: 'ticket, sessionId and file path are required' }
   }
   // An empty FIRST path segment is the UNC marker (encodeHtmlUrl emits
   // '<sid>//server/share/...' for UNC paths); the encoder filters empty
@@ -85,7 +96,7 @@ export function decodeHtmlUrl(pathname: string): HtmlDecodeResult {
   const unc = pathSegments[0] === ''
   const tail = unc ? pathSegments.slice(1) : pathSegments
   if (tail.length === 0 || tail.some(segment => segment === '')) {
-    return { ok: false, status: 400, message: 'sessionId and file path are required' }
+    return { ok: false, status: 400, message: 'ticket, sessionId and file path are required' }
   }
   let path: string
   if (unc) {
@@ -102,5 +113,5 @@ export function decodeHtmlUrl(pathname: string): HtmlDecodeResult {
   } else {
     path = `/${tail.join('/')}`
   }
-  return { ok: true, ref: { sessionId, path } }
+  return { ok: true, ref: { ticket, sessionId, path } }
 }

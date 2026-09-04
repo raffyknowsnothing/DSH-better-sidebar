@@ -49,8 +49,12 @@ describe('HTML preview iframe sandbox', () => {
     // ...which must never contain the dangerous tokens.
     expect(HTML_IFRAME_SANDBOX).not.toContain('allow-same-origin')
     expect(HTML_IFRAME_SANDBOX).not.toContain('allow-top-navigation')
-    // Cross-origin framing by construction: route-src (never srcdoc).
-    expect(iframe).toContain('src="/sidebar/html/s1/p/a/index.html"')
+    // Cross-origin framing by construction: route-src (never srcdoc). The
+    // src itself waits for the preview ticket (html-ticket.ts), which the
+    // client fetches in an effect — so on this first paint the frame is
+    // mounted with the sandbox already applied and no src yet. The ticket'd
+    // URL is covered by html-preview-ticket.spec.tsx.
+    expect(iframe).not.toContain('src=')
     expect(iframe).not.toContain('srcdoc=')
     // Referrer + permissions policy stay locked even when sandboxed.
     // (React SSR renders the referrerPolicy prop camelCase as written.)

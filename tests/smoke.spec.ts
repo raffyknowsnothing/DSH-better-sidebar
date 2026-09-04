@@ -47,6 +47,29 @@ interface FakeContext {
 }
 
 /**
+ * Read one mount's HTML preview ticket the way the client does: over the
+ * fenced JSON route. `apply()` mints a fresh ticket per mount, so a preview
+ * URL cannot be hardcoded — which is the point of the ticket (html-ticket.ts).
+ */
+async function htmlTicketOf(routes: SidebarWebRoute[]): Promise<string> {
+  const api = routes.find(route => route.path === '/sidebar/api')!
+  const body = Buffer.from('{}')
+  const req = {
+    method: 'POST',
+    url: '/sidebar/api/html.ticket',
+    headers: { host: '127.0.0.1:3080' },
+    [Symbol.asyncIterator]: async function* () { yield body },
+  } as never
+  let out = ''
+  const res = {
+    writeHead: () => {},
+    end: (chunk: unknown) => { out += String(chunk ?? '') },
+  } as never
+  await api.handler(req, res)
+  return (JSON.parse(out) as { value: { ticket: string } }).value.ticket
+}
+
+/**
  * The login-shell test spawns a real pty whose bash may still be writing to
  * the temp HOME (history files, etc.) when `disposeAll()` returns — `close()`
  * only requests the kill and the process exit lands asynchronously in
@@ -142,7 +165,7 @@ describe('host plugin smoke', () => {
       const route = routes.find(candidate => candidate.path === '/sidebar/html')!
       const req = {
         method: 'GET',
-        url: encodeHtmlUrl('s-html', path),
+        url: encodeHtmlUrl(await htmlTicketOf(routes), 's-html', path),
         headers: { host: '127.0.0.1:3080' },
       } as never
       const response: { status?: number; headers?: Record<string, string>; chunks: Buffer[] } = { chunks: [] }
@@ -738,7 +761,7 @@ describe('session cwd resolution over the API route', () => {
       // Use the production encoder so the URL is well-formed on every
       // platform (a Windows drive path needs the leading slash separator
       // that a naive join-without-separator drops).
-      const htmlResult = await invokeGet(html, encodeHtmlUrl('security', join(workspace, 'link', 'secret.html')))
+      const htmlResult = await invokeGet(html, encodeHtmlUrl(await htmlTicketOf(routes), 'security', join(workspace, 'link', 'secret.html')))
       expect(mediaResult).toMatchObject({ status: 403 })
       expect(JSON.parse(mediaResult.body)).toMatchObject({ ok: false, error: { code: 'forbidden' } })
       expect(htmlResult).toMatchObject({ status: 403 })

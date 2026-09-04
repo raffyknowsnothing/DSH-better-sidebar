@@ -55,17 +55,42 @@ function isTrustedAuthority(hostUrl: URL, trustedHosts: readonly string[]): bool
 }
 
 /**
+ * The Host half of the fence on its own: the request authority is loopback
+ * or a configured trusted host. This is the DNS-rebinding defense and it
+ * applies to every route. The browser-marker half ({@link isTrustedApiRequest})
+ * is layered on top for routes served into the GUI's own origin; the HTML
+ * preview route cannot use it, because it serves an opaque-origin document
+ * whose own subresource and reload requests are indistinguishable by header
+ * from a cross-site attacker's (both send `Sec-Fetch-Site: cross-site` with
+ * no `Origin`, or `Origin: null` for CORS-mode fetches). That route proves
+ * itself with an unguessable ticket instead — see html-ticket.ts.
+ * @param request - node HTTP request facts (headers).
+ * @param trustedHosts - non-loopback authorities this deployment serves.
+ * @returns true when the Host header names this deployment.
+ */
+export function isTrustedHostRequest(request: ApiTrustRequest, trustedHosts: readonly string[]): boolean {
+  return trustedHostUrl(request, trustedHosts) !== undefined
+}
+
+/** The request's Host authority as a URL, or undefined when it is not ours. */
+function trustedHostUrl(request: ApiTrustRequest, trustedHosts: readonly string[]): URL | undefined {
+  const host = header(request.headers, 'host')
+  if (host === undefined) return undefined
+  const hostUrl = parseAuthority(host)
+  if (hostUrl === undefined) return undefined
+  if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHosts)) return undefined
+  return hostUrl
+}
+
+/**
  * Decide whether one sidebar request may reach the plugin routes.
  * @param request - node HTTP request facts (headers).
  * @param trustedHosts - non-loopback authorities this deployment serves.
  * @returns true when the Host is ours (loopback or trusted) and browser markers are same-origin.
  */
 export function isTrustedApiRequest(request: ApiTrustRequest, trustedHosts: readonly string[]): boolean {
-  const host = header(request.headers, 'host')
-  if (host === undefined) return false
-  const hostUrl = parseAuthority(host)
+  const hostUrl = trustedHostUrl(request, trustedHosts)
   if (hostUrl === undefined) return false
-  if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHosts)) return false
   if (header(request.headers, 'sec-fetch-site') === 'cross-site') return false
   // Origin fence: when a browser attaches an Origin it must name this
   // hostname (the Host fence above already bound the authority, so the port

@@ -328,6 +328,10 @@ export const api = {
   /** The effective terminal shell and its display name (plugin-global). */
   shellGet: () =>
     call<{ shell: string; name: string }>('shell.get', {}),
+  /** This run's HTML preview ticket. Prefer {@link ensureHtmlTicket}, which
+   *  caches it — the value is stable for the life of the host process. */
+  htmlTicket: () =>
+    call<{ ticket: string }>('html.ticket', {}),
   /** Read the side card preferences (plugin-global, no session scope). */
   settingsGet: () =>
     call<{ value?: unknown; revision?: number; externalDisable?: boolean }>('settings.get', {}),
@@ -368,14 +372,46 @@ function fileUrl(scope: SessionScope, path: string, download: boolean): string {
   return `/sidebar/file?${params.toString()}`
 }
 
+/** Cached preview ticket; stable for the life of the host process. */
+let htmlTicketValue: string | undefined
+/** In-flight fetch, so N previews opening at once make one request. */
+let htmlTicketPending: Promise<string> | undefined
+
+/**
+ * Resolve this run's HTML preview ticket, fetching it once and caching it.
+ * A failure clears the cache so the next preview retries rather than
+ * inheriting a dead promise.
+ */
+export async function ensureHtmlTicket(): Promise<string> {
+  if (htmlTicketValue !== undefined) return htmlTicketValue
+  htmlTicketPending ??= api.htmlTicket().then((result) => {
+    htmlTicketValue = result.ticket
+    return result.ticket
+  })
+  try {
+    return await htmlTicketPending
+  } catch (error) {
+    htmlTicketPending = undefined
+    throw error
+  }
+}
+
+/** Drop the cached ticket (tests; a host restart mints a new one). */
+export function resetHtmlTicket(): void {
+  htmlTicketValue = undefined
+  htmlTicketPending = undefined
+}
+
 /**
  * Absolute URL of the HTML preview route (see html-route.ts): the path is
  * fully encoded so the previewed page's relative assets resolve back into
- * the same route with the session scope intact. The UNC marker is
+ * the same route with the ticket and session scope intact. The UNC marker is
  * platform-neutral — the host's requireAbsolute resolves the decoded
  * forward-slash `//server/share/...` form on both win32 and POSIX — so no
  * client-side platform signal is needed.
+ * @param ticket - from {@link ensureHtmlTicket}; the route's proof of origin,
+ * without which the previewed page's own assets are refused.
  */
-export function htmlUrl(scope: SessionScope, path: string): string {
-  return encodeHtmlUrl(scope.sessionId, path)
+export function htmlUrl(ticket: string, scope: SessionScope, path: string): string {
+  return encodeHtmlUrl(ticket, scope.sessionId, path)
 }

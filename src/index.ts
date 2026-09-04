@@ -35,7 +35,8 @@ import { ensureWorkspacePath, ensureWorkspaceWritePath } from './path-security.t
 import { searchFiles } from './fs-search.ts'
 import { decodeHtmlUrl } from './html-route.ts'
 import { extractFrameAncestors } from './browser-probe.ts'
-import { isTrustedApiRequest, isLoopbackHostname } from './trust-fence.ts'
+import { isTrustedApiRequest, isTrustedHostRequest, isLoopbackHostname } from './trust-fence.ts'
+import { mintHtmlTicket, isValidHtmlTicket } from './html-ticket.ts'
 import { registerBundleRoute } from './bundle-route.ts'
 import { launchExternal } from './open-external.ts'
 import * as git from './git.ts'
@@ -98,6 +99,47 @@ const MEDIA_TYPES: Record<string, string> = {
 /** Content type served by /sidebar/file (binary-safe fallback for unknowns). */
 export function mediaTypeForPath(path: string): string {
   return MEDIA_TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream'
+}
+
+/**
+ * Extra content types the HTML PREVIEW route serves, on top of MEDIA_TYPES.
+ * These are deliberately not in the shared map: /sidebar/file is reached from
+ * the GUI's own origin, and serving it a file as `text/javascript` would let
+ * a workspace file be loaded as a script there. The preview route hands its
+ * bytes to an opaque-origin document instead, where a stylesheet is a
+ * stylesheet and nothing more.
+ */
+const PREVIEW_TYPES: Record<string, string> = {
+  '.css': 'text/css',
+  '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
+  '.json': 'application/json',
+  '.map': 'application/json',
+  '.txt': 'text/plain; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
+  '.wasm': 'application/wasm',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+}
+
+/**
+ * Content type for one file served into an HTML preview. The route sends
+ * `X-Content-Type-Options: nosniff`, so a wrong type is not a cosmetic
+ * problem — Chromium REFUSES a stylesheet served as
+ * `application/octet-stream`, which is what every `.css` got before this map
+ * existed. A previewed page with no styles and no scripts looked like a
+ * fence bug and was in fact this.
+ */
+export function previewTypeForPath(path: string): string {
+  const extension = extname(path).toLowerCase()
+  return MEDIA_TYPES[extension] ?? PREVIEW_TYPES[extension] ?? 'application/octet-stream'
 }
 
 /**
@@ -277,6 +319,7 @@ function buildApi(
   resolved: ResolvedSidebarConfig,
   terminalShell: string,
   getSettings: () => SidebarSettingsFace | undefined,
+  htmlTicket: string,
 ): Record<string, ApiMethod> {
   const cwdOf = async (payload: unknown): Promise<{ sessionId: string; cwd: string }> => {
     const sessionId = requireString(payload, 'sessionId')
@@ -477,6 +520,13 @@ function buildApi(
     // "Terminal N" label; the shell itself is configured through
     // `cordis.patch.yml` (`config.shell`) or resolved by the host default.
     'shell.get': () => ({ shell: terminalShell, name: shellDisplayName(terminalShell) }),
+    // This run's HTML preview ticket (html-ticket.ts). The client writes it
+    // into every preview URL so the previewed page's own assets and reloads
+    // carry it; the preview route trusts it in place of the browser-marker
+    // fence, which an opaque-origin document can never satisfy. This route
+    // keeps the marker fence, so only the GUI's own origin can read the
+    // ticket — a cross-site page asking for it is refused before it runs.
+    'html.ticket': () => ({ ticket: htmlTicket }),
     // The side card preferences. The settings service is optional in the
     // composition; while absent the routes report undefined and the client
     // keeps the schema defaults. Writes are revision-guarded: a stale editor
@@ -625,6 +675,15 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
   // gateway fence derives its list from. Read per request from the live
   // service value; a replaced list takes effect without a plugin restart.
   const fence = (req: SidebarHttpRequest): boolean => isTrustedApiRequest(req, ctx.webRuntime.trustedHosts)
+  // The Host half alone, for the HTML preview route: its requests come from
+  // an opaque origin and carry cross-site markers by construction, so the
+  // marker half would refuse the previewed page's own assets. That route
+  // pairs this with the ticket below (html-ticket.ts).
+  const hostFence = (req: SidebarHttpRequest): boolean => isTrustedHostRequest(req, ctx.webRuntime.trustedHosts)
+  // One preview ticket per plugin run. Handed to the client over the fenced
+  // 'html.ticket' route; a restart mints a new one and open previews simply
+  // reload.
+  const htmlTicket = mintHtmlTicket()
   // node-pty is loaded lazily, never at module top level (issue #140): a
   // missing or broken install must degrade THIS plugin — terminal tab shows
   // a repair command, agent terminal tools stay unregistered — instead of
@@ -764,7 +823,7 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
   })
 
   // ── JSON API ────────────────────────────────────────────────────────────
-  const api = buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, () => settingsFace)
+  const api = buildApi(ctx, ptyManager, agentPtyRegistry, resolved, terminalShell, () => settingsFace, htmlTicket)
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: '/sidebar/api',
@@ -900,7 +959,13 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
     kind: 'prefix',
     path: '/sidebar/html',
     handler: async (req, res) => {
-      if (!fence(req)) {
+      // Host fence only. The marker fence cannot run here: the response
+      // below puts the document in an opaque origin, so its stylesheet,
+      // images, module scripts, fetches and its own location.reload() all
+      // return as `Sec-Fetch-Site: cross-site` (with `Origin: null` for the
+      // CORS-mode ones) — byte-identical to a cross-site attacker's request.
+      // The ticket in the URL is what separates the two; see html-ticket.ts.
+      if (!hostFence(req)) {
         res.writeHead(403)
         res.end('forbidden')
         return
@@ -917,7 +982,14 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
           writeError(res, new SidebarError('bad-request', decoded.message, decoded.status))
           return
         }
-        const { sessionId, path } = decoded.ref
+        const { ticket, sessionId, path } = decoded.ref
+        // A wrong ticket answers exactly like the fence did, so a probing
+        // page learns nothing about whether the path exists.
+        if (!isValidHtmlTicket(ticket, htmlTicket)) {
+          res.writeHead(403)
+          res.end('forbidden')
+          return
+        }
         // The session's authoritative cwd (client cwd cannot ride in the URL
         // — the path encoding has no query; a detached first request falls
         // back to the process cwd and is normally refused by the workspace
@@ -929,7 +1001,7 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         if (!info.isFile() || info.size > resolved.mediaLimit) {
           throw new SidebarError('fs-error', 'not a file or too large', 400)
         }
-        const type = mediaTypeForPath(absolute)
+        const type = previewTypeForPath(absolute)
         const body = await readFile(absolute)
         res.writeHead(200, {
           'content-type': type === 'text/html' ? 'text/html; charset=utf-8' : type,

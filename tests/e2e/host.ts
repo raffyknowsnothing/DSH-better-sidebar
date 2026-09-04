@@ -11,7 +11,7 @@
  * - `createHostApi()` for an APIRequestContext carrying the auth cookie,
  * - `hostRpc(api, 'workspace.create', {...})` for the host's unary RPC.
  */
-import { request, type APIRequestContext, type Page } from '@playwright/test'
+import { expect, request, type APIRequestContext, type Page } from '@playwright/test'
 import { parseLaunchUrl, pageUrlWith, rpcAttempt } from './host-protocol'
 
 const envUrl = process.env.DSH_E2E_URL
@@ -131,4 +131,41 @@ export async function hostRpc<T = unknown>(
     throw new Error(`hostRpc ${method} [${attempt.path}] envelope error: ${bodyText.slice(0, 400)}`)
   }
   return result
+}
+
+/**
+ * Dismiss the onboarding takeovers a keyless boot stacks over the shell: a
+ * versioned welcome notice ("Continue", acknowledged into settings) and a
+ * provider-config dialog ("Configure later", session-only, always present
+ * while no credential is configured). Both mask the whole shell, so any
+ * click on the sidebar before this resolves is intercepted by their overlay.
+ * A build without onboarding proceeds straight through.
+ */
+export async function dismissOnboarding(page: Page): Promise<void> {
+  try {
+    await expect
+      .poll(() => page.getByRole('button', { name: /^(Continue|Configure later)$/ }).count(), { timeout: 60_000 })
+      .toBeGreaterThan(0)
+  } catch {
+    console.warn('[e2e] no onboarding takeover appeared; proceeding without dismissal')
+    return
+  }
+  // Dismiss whatever is present, in any stacking order, until none remain —
+  // a masked click is retried next round instead of failing.
+  for (let round = 0; round < 8; round++) {
+    let dismissed = false
+    for (const name of ['Continue', 'Configure later']) {
+      const button = page.getByRole('button', { name, exact: true }).first()
+      if ((await button.count()) === 0) continue
+      try {
+        await button.click({ timeout: 4_000 })
+        dismissed = true
+        await page.waitForTimeout(1_000)
+      } catch {
+        // Masked by the takeover stacked above it; the next round tries the
+        // other button first.
+      }
+    }
+    if (!dismissed) break
+  }
 }

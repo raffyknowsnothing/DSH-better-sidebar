@@ -22,7 +22,7 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { highlightSelectionMatches, openSearchPanel, search, searchKeymap } from '@codemirror/search'
 import { IconCheckOutline16, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { markdownTextProps } from './markdown-labels.tsx'
-import { api, htmlUrl } from './api.ts'
+import { api, htmlUrl, ensureHtmlTicket } from './api.ts'
 import { rewriteLocalImageUrls } from './markdown-images.ts'
 import { languageForPath } from './lang.ts'
 import { cmSurfaceTheme, CmThemeCompartment } from './cm-themes.ts'
@@ -386,6 +386,17 @@ export function TextEditor(props: FileViewerProps) {
   const [localUnlock, setLocalUnlock] = useState(() => props.store?.getPrefs().htmlViewerDefaultUnsafe === true)
   const htmlNoSandbox = props.store?.getPrefs().htmlViewerNoSandbox === true || localUnlock
 
+  // The preview route's ticket (html-ticket.ts). The URL cannot be built
+  // without it, so the iframe waits for the one fetch; the value is cached
+  // process-wide, so every preview after the first renders immediately.
+  const [htmlTicket, setHtmlTicket] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    if (!html) return
+    let live = true
+    void ensureHtmlTicket().then((ticket) => { if (live) setHtmlTicket(ticket) }).catch(() => {})
+    return () => { live = false }
+  }, [html])
+
   // Host-toolbar mode (the merged editor header renders the controls): skip
   // the own toolbar row, report the state after every relevant render (the
   // JSON key guards redundant calls), and register the commands on mount.
@@ -501,9 +512,12 @@ export function TextEditor(props: FileViewerProps) {
               origin when unsandboxed; the route URL keeps the frame
               cross-origin by construction). The preview shows the SAVED
               file; the draft is only visible in edit mode. */}
+          {/* The frame mounts immediately and stays mounted; only `src` waits
+              for the ticket, so the preview never flashes an empty slot and
+              the sandbox contract is in place before anything loads. */}
           <iframe
             className={css.editorHtml}
-            src={htmlUrl(scope, path)}
+            src={htmlTicket === undefined ? undefined : htmlUrl(htmlTicket, scope, path)}
             sandbox={htmlNoSandbox ? undefined : HTML_IFRAME_SANDBOX}
             referrerPolicy="no-referrer"
             allow=""
