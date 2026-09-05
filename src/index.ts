@@ -18,7 +18,7 @@ import { basename, dirname, extname, isAbsolute, join } from 'node:path'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
-import type { Context, SidebarHttpRequest } from './context-types.ts'
+import type { Context, SidebarHttpRequest, SidebarHttpResponse } from './context-types.ts'
 import {
   Config,
   PrefsSchema,
@@ -36,7 +36,7 @@ import { searchFiles } from './fs-search.ts'
 import { decodeHtmlUrl } from './html-route.ts'
 import { extractFrameAncestors } from './browser-probe.ts'
 import { isTrustedApiRequest, isTrustedHostRequest, isLoopbackHostname } from './trust-fence.ts'
-import { mintHtmlTicket, isValidHtmlTicket } from './html-ticket.ts'
+import { htmlTicketOfProcess, isValidHtmlTicket } from './html-ticket.ts'
 import { registerBundleRoute } from './bundle-route.ts'
 import { launchExternal } from './open-external.ts'
 import * as git from './git.ts'
@@ -680,10 +680,23 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
   // marker half would refuse the previewed page's own assets. That route
   // pairs this with the ticket below (html-ticket.ts).
   const hostFence = (req: SidebarHttpRequest): boolean => isTrustedHostRequest(req, ctx.webRuntime.trustedHosts)
-  // One preview ticket per plugin run. Handed to the client over the fenced
-  // 'html.ticket' route; a restart mints a new one and open previews simply
-  // reload.
-  const htmlTicket = mintHtmlTicket()
+  // The preview ticket, handed to the client over the fenced 'html.ticket'
+  // route. Per PROCESS, not per apply(): a live patch reload or a second
+  // mount must not strand the ticket an already-loaded page is holding
+  // (html-ticket.ts explains why at length).
+  const htmlTicket = htmlTicketOfProcess()
+  /**
+   * Refuse one preview request. The body stays the bare `forbidden` every
+   * branch has always sent, so a probing page cannot tell the branches apart
+   * or learn whether a path exists. The REASON goes to the host log instead,
+   * because a user seeing `forbidden` inside the preview frame otherwise has
+   * nothing at all to go on.
+   */
+  const refusePreview = (req: SidebarHttpRequest, res: SidebarHttpResponse, reason: string): void => {
+    ctx.logger?.warn(`[dsh-better-sidebar] /sidebar/html refused: ${reason}`)
+    res.writeHead(403)
+    res.end('forbidden')
+  }
   // node-pty is loaded lazily, never at module top level (issue #140): a
   // missing or broken install must degrade THIS plugin — terminal tab shows
   // a repair command, agent terminal tools stay unregistered — instead of
@@ -966,8 +979,7 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
       // CORS-mode ones) — byte-identical to a cross-site attacker's request.
       // The ticket in the URL is what separates the two; see html-ticket.ts.
       if (!hostFence(req)) {
-        res.writeHead(403)
-        res.end('forbidden')
+        refusePreview(req, res, `untrusted Host "${req.headers.host ?? '(absent)'}"`)
         return
       }
       if (req.method !== 'GET') {
@@ -986,8 +998,7 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
         // A wrong ticket answers exactly like the fence did, so a probing
         // page learns nothing about whether the path exists.
         if (!isValidHtmlTicket(ticket, htmlTicket)) {
-          res.writeHead(403)
-          res.end('forbidden')
+          refusePreview(req, res, 'the URL carries a ticket this host did not mint (a stale page, or a host restart since the page loaded)')
           return
         }
         // The session's authoritative cwd (client cwd cannot ride in the URL

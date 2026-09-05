@@ -237,18 +237,33 @@ describe('the ticket is what a cross-site page cannot forge', () => {
     }
   })
 
-  it('mints a different ticket per mount', async () => {
+  it('keeps one ticket per process, so a re-apply cannot strand a loaded page', async () => {
+    // Deliberately NOT per apply(): a profile with patchReload "live"
+    // re-applies the plugin, and a second mount is legal. A rotating ticket
+    // would 403 every preview on an already-loaded page, indistinguishably
+    // from the original bug. See html-ticket.ts.
     const first = await mount()
     const second = await mount()
     try {
-      expect(first.ticket).not.toBe(second.ticket)
+      expect(first.ticket).toBe(second.ticket)
       expect(first.ticket.length).toBeGreaterThanOrEqual(32)
-      // A ticket from one host process is useless against another.
+      // Either instance serves a URL built from either instance's ticket.
       const reply = await second.get(encodeHtmlUrl(first.ticket, SESSION, documentPath), SAME_ORIGIN)
-      expect(reply.status).toBe(403)
+      expect(reply.status).toBe(200)
     } finally {
       first.cleanup()
       second.cleanup()
+    }
+  })
+
+  it('is long enough to be unguessable', async () => {
+    const { ticket, cleanup } = await mount()
+    try {
+      // 24 random bytes, base64url. Length is the cheap proxy; the entropy
+      // is what stops a cross-site page from finding it by trying.
+      expect(ticket).toMatch(/^[A-Za-z0-9_-]{32}$/)
+    } finally {
+      cleanup()
     }
   })
 })

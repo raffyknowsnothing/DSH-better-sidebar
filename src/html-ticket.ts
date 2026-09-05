@@ -29,9 +29,29 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 /** Bytes of entropy per ticket (192 bits, base64url → 32 characters). */
 const TICKET_BYTES = 24
 
-/** Mint one unguessable preview ticket. */
-export function mintHtmlTicket(): string {
-  return randomBytes(TICKET_BYTES).toString('base64url')
+/**
+ * The ticket is per PROCESS, not per `apply()`.
+ *
+ * A per-apply ticket looks tidier and is wrong here. The plugin's routes are
+ * registered through `ctx.effect`, and a profile with `patchReload: "live"`
+ * re-applies the plugin whenever its patch changes; a host can also mount the
+ * plugin more than once. Each of those rotates a per-apply ticket, while an
+ * already-loaded client page holds the one it fetched at mount — so every
+ * preview 403s until the user reloads the page, with no way to tell that from
+ * the original bug. Worse, if two instances are live at once, the instance
+ * answering `html.ticket` need not be the one serving `/sidebar/html`, and
+ * nothing works at all.
+ *
+ * One value per process makes re-apply, double-mount and live patch reload
+ * all harmless. Restarting the host still rotates it, which is the only
+ * rotation that matters: a ticket never leaves the machine.
+ */
+let processTicket: string | undefined
+
+/** This process's preview ticket, minted on first use. */
+export function htmlTicketOfProcess(): string {
+  processTicket ??= randomBytes(TICKET_BYTES).toString('base64url')
+  return processTicket
 }
 
 /**
