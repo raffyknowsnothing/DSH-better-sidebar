@@ -411,7 +411,11 @@ export function resetHtmlTicket(): void {
  * client-side platform signal is needed.
  * @param ticket - from {@link ensureHtmlTicket}; the route's proof of origin,
  * without which the previewed page's own assets are refused.
+ * @param sandboxed - the previewer's current sandbox state. It rides the URL
+ * because the response's CSP has to agree with the iframe's attribute: the
+ * header alone can pin the page into an opaque origin whatever the attribute
+ * says, which is exactly what made the "disable sandbox" toggle do nothing.
  */
-export function htmlUrl(ticket: string, scope: SessionScope, path: string): string {
-  return encodeHtmlUrl(ticket, scope.sessionId, path)
+export function htmlUrl(ticket: string, scope: SessionScope, path: string, sandboxed = true): string {
+  return encodeHtmlUrl(ticket, scope.sessionId, path, sandboxed)
 }

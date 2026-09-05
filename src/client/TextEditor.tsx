@@ -517,7 +517,7 @@ export function TextEditor(props: FileViewerProps) {
               the sandbox contract is in place before anything loads. */}
           <iframe
             className={css.editorHtml}
-            src={htmlTicket === undefined ? undefined : htmlUrl(htmlTicket, scope, path)}
+            src={htmlTicket === undefined ? undefined : htmlUrl(htmlTicket, scope, path, !htmlNoSandbox)}
             sandbox={htmlNoSandbox ? undefined : HTML_IFRAME_SANDBOX}
             referrerPolicy="no-referrer"
             allow=""

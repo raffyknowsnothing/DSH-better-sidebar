@@ -994,7 +994,7 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
           writeError(res, new SidebarError('bad-request', decoded.message, decoded.status))
           return
         }
-        const { ticket, sessionId, path } = decoded.ref
+        const { ticket, sandboxed, sessionId, path } = decoded.ref
         // A wrong ticket answers exactly like the fence did, so a probing
         // page learns nothing about whether the path exists.
         if (!isValidHtmlTicket(ticket, htmlTicket)) {
@@ -1020,9 +1020,17 @@ export function apply(ctx: Context, config?: SidebarConfig): void {
           'x-content-type-options': 'nosniff',
           'referrer-policy': 'no-referrer',
           // The sandbox directive (no allow-same-origin → opaque origin) is
-          // the previewer's security boundary even for top-level loads;
-          // object-src 'none' blocks plugin embeds.
-          'content-security-policy': "sandbox allow-scripts allow-popups allow-downloads allow-modals; object-src 'none'",
+          // the previewer's security boundary even for top-level loads (a
+          // popup a previewed page opens carries no iframe attribute), so it
+          // rides the response rather than the frame alone. It is dropped
+          // only when the user has turned the sandbox off, which is the whole
+          // point of that setting: sending it regardless made the toggle
+          // inert, because the header re-imposed the opaque origin the
+          // attribute had just given up. object-src 'none' blocks plugin
+          // embeds either way.
+          'content-security-policy': sandboxed
+            ? "sandbox allow-scripts allow-popups allow-downloads allow-modals; object-src 'none'"
+            : "object-src 'none'",
         })
         res.end(body)
       } catch (error) {

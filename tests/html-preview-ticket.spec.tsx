@@ -39,13 +39,13 @@ function viewerProps(store: ReturnType<typeof createSidebarStore>): FileViewerPr
 }
 
 /** Render one HTML preview and return its iframe once effects have flushed. */
-async function renderPreview(): Promise<HTMLIFrameElement> {
+async function renderPreview(store = createSidebarStore()): Promise<HTMLIFrameElement> {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
   roots.push(root)
   await act(async () => {
-    root.render(<TextEditor {...viewerProps(createSidebarStore())} />)
+    root.render(<TextEditor {...viewerProps(store)} />)
   })
   return container.querySelector('iframe')!
 }
@@ -54,7 +54,7 @@ describe('HTML preview ticket', () => {
   it('loads the preview through a ticketed URL', async () => {
     vi.spyOn(api, 'htmlTicket').mockResolvedValue({ ticket: 'tkt-abc' })
     const iframe = await renderPreview()
-    expect(iframe.getAttribute('src')).toBe('/sidebar/html/tkt-abc/s1/p/a/index.html')
+    expect(iframe.getAttribute('src')).toBe('/sidebar/html/tkt-abc/s/s1/p/a/index.html')
     // The sandbox contract is unchanged by the ticket.
     expect(iframe.getAttribute('sandbox')).toBe(HTML_IFRAME_SANDBOX)
   })
@@ -80,6 +80,27 @@ describe('HTML preview ticket', () => {
     await renderPreview()
     htmlTicket.mockResolvedValue({ ticket: 'tkt-second' })
     const iframe = await renderPreview()
-    expect(iframe.getAttribute('src')).toBe('/sidebar/html/tkt-second/s1/p/a/index.html')
+    expect(iframe.getAttribute('src')).toBe('/sidebar/html/tkt-second/s/s1/p/a/index.html')
+  })
+})
+
+describe('the sandbox toggle reaches the route', () => {
+  it('asks for the sandboxed mode by default', async () => {
+    vi.spyOn(api, 'htmlTicket').mockResolvedValue({ ticket: 'tkt-abc' })
+    const iframe = await renderPreview()
+    expect(iframe.getAttribute('src')).toContain('/tkt-abc/s/')
+    expect(iframe.getAttribute('sandbox')).toBe(HTML_IFRAME_SANDBOX)
+  })
+
+  it('asks for the unsandboxed mode when the setting is off', async () => {
+    // The URL is the only way the route learns the user's choice, and it has
+    // to agree with the attribute: the response's CSP can pin the page into
+    // an opaque origin whatever the attribute says.
+    vi.spyOn(api, 'htmlTicket').mockResolvedValue({ ticket: 'tkt-abc' })
+    const store = createSidebarStore()
+    store.setPrefs({ ...store.getPrefs(), htmlViewerNoSandbox: true })
+    const iframe = await renderPreview(store)
+    expect(iframe.getAttribute('src')).toContain('/tkt-abc/u/')
+    expect(iframe.getAttribute('sandbox')).toBeNull()
   })
 })

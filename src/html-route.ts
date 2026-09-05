@@ -39,6 +39,16 @@
 export interface HtmlRouteRef {
   /** The preview ticket the URL carried; the host validates it (html-ticket.ts). */
   ticket: string
+  /**
+   * Whether the response must carry the CSP `sandbox` directive. The client
+   * asks for this per preview, because the user can turn the sandbox off
+   * (side card `htmlViewerNoSandbox`, or the status row's temporary unlock)
+   * and only the client knows the current state of either. The iframe's own
+   * `sandbox` attribute cannot express it alone: the header re-imposes an
+   * opaque origin no matter what the attribute says, which is why turning the
+   * sandbox off used to change nothing at all.
+   */
+  sandboxed: boolean
   sessionId: string
   /** Absolute file path (leading slash; Windows drives keep their colon). */
   path: string
@@ -52,21 +62,40 @@ export type HtmlDecodeResult =
 /** The route prefix both encoders/decoders agree on. */
 export const HTML_ROUTE_PREFIX = '/sidebar/html/'
 
-/** Build the route URL for one absolute file path (client + tests). */
-export function encodeHtmlUrl(ticket: string, sessionId: string, path: string): string {
+/**
+ * The sandbox-mode segment. It rides the path for the same reason everything
+ * else does: a relative asset must resolve back onto a URL that still asks
+ * for the same mode, or the page's own stylesheet would come back under a
+ * different origin policy than the document.
+ */
+const SANDBOXED_SEGMENT = 's'
+const UNSANDBOXED_SEGMENT = 'u'
+
+/**
+ * Build the route URL for one absolute file path (client + tests).
+ * @param sandboxed - false only when the user has turned the previewer's
+ * sandbox off; the response then omits the CSP sandbox directive and the page
+ * runs on the GUI's own origin, which is what that setting warns about.
+ */
+export function encodeHtmlUrl(ticket: string, sessionId: string, path: string, sandboxed = true): string {
   const unc = /^[\\/]{2}[^\\/]/.test(path)
   const segments = path.split(/[\\/]+/).filter(segment => segment !== '')
-  return `${HTML_ROUTE_PREFIX}${encodeURIComponent(ticket)}/${encodeURIComponent(sessionId)}/${unc ? '/' : ''}${segments.map(encodeURIComponent).join('/')}`
+  const mode = sandboxed ? SANDBOXED_SEGMENT : UNSANDBOXED_SEGMENT
+  return `${HTML_ROUTE_PREFIX}${encodeURIComponent(ticket)}/${mode}/${encodeURIComponent(sessionId)}/${unc ? '/' : ''}${segments.map(encodeURIComponent).join('/')}`
 }
 
 /**
- * Decode a route pathname into the ticket, session and absolute file path.
- * Rejects a wrong prefix (404), an empty path, malformed percent encoding,
- * and a missing ticket, sessionId or file path (400). Decoding proves
- * nothing on its own: the caller must still validate the ticket against
- * this run's value and bound the decoded path with the workspace real-path
- * guard — a decoded `..` segment resolves outside the cwd and is refused
- * there.
+ * Decode a route pathname into the ticket, sandbox mode, session and absolute
+ * file path. Rejects a wrong prefix (404), an empty path, malformed percent
+ * encoding, an unknown sandbox mode, and a missing ticket, sessionId or file
+ * path (400). Decoding proves nothing on its own: the caller must still
+ * validate the ticket against this run's value and bound the decoded path
+ * with the workspace real-path guard — a decoded `..` segment resolves
+ * outside the cwd and is refused there.
+ *
+ * The mode segment is rejected rather than defaulted. A URL that fails to
+ * name a mode is a bug in the caller, and guessing would hand the previewed
+ * page the wrong origin policy in whichever direction the default leans.
  */
 export function decodeHtmlUrl(pathname: string): HtmlDecodeResult {
   if (!pathname.startsWith(HTML_ROUTE_PREFIX)) {
@@ -82,9 +111,12 @@ export function decodeHtmlUrl(pathname: string): HtmlDecodeResult {
   } catch {
     return { ok: false, status: 400, message: 'malformed URL encoding' }
   }
-  const [ticket, sessionId, ...pathSegments] = segments
+  const [ticket, mode, sessionId, ...pathSegments] = segments
   if (ticket === undefined || ticket === '') {
     return { ok: false, status: 400, message: 'ticket, sessionId and file path are required' }
+  }
+  if (mode !== SANDBOXED_SEGMENT && mode !== UNSANDBOXED_SEGMENT) {
+    return { ok: false, status: 400, message: 'unknown sandbox mode' }
   }
   if (sessionId === undefined || sessionId === '') {
     return { ok: false, status: 400, message: 'ticket, sessionId and file path are required' }
@@ -113,5 +145,5 @@ export function decodeHtmlUrl(pathname: string): HtmlDecodeResult {
   } else {
     path = `/${tail.join('/')}`
   }
-  return { ok: true, ref: { ticket, sessionId, path } }
+  return { ok: true, ref: { ticket, sandboxed: mode === SANDBOXED_SEGMENT, sessionId, path } }
 }

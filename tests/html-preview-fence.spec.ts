@@ -188,6 +188,24 @@ describe('a sandboxed preview can load its own assets', () => {
     }
   })
 
+  it('drops the sandbox header when the previewer asks for the unsandboxed mode', async () => {
+    // The regression this locks down: the header used to go out on every
+    // preview, so turning the sandbox off removed the iframe attribute and
+    // the header put the opaque origin straight back. The page still had no
+    // origin, so it still had no storage and could not call its own server —
+    // and the setting's warning about "full session access" was simply false.
+    const { get, ticket, cleanup } = await mount()
+    try {
+      const reply = await get(encodeHtmlUrl(ticket, SESSION, documentPath, false), SAME_ORIGIN)
+      expect(reply.status).toBe(200)
+      expect(reply.headers['content-security-policy']).not.toContain('sandbox')
+      // Plugin embeds stay blocked either way.
+      expect(reply.headers['content-security-policy']).toContain("object-src 'none'")
+    } finally {
+      cleanup()
+    }
+  })
+
   it('keeps the opaque-origin sandbox header on the served document', async () => {
     // The ticket replaces the marker fence, not the sandbox. The preview
     // must still run without same-origin access to the GUI.
@@ -217,9 +235,15 @@ describe('the ticket is what a cross-site page cannot forge', () => {
   it('refuses a URL in the old ticket-less shape', async () => {
     const { get, cleanup } = await mount()
     try {
-      // '/sidebar/html/<session>/<path>' now reads the session as the ticket.
+      // '/sidebar/html/<session>/<path>' reads the session as the ticket and
+      // the first path segment as the sandbox mode, so it fails before it
+      // ever reaches a file.
       const reply = await get(`/sidebar/html/${SESSION}${documentPath}`, SAME_ORIGIN)
-      expect(reply.status).toBe(403)
+      expect(reply.status).toBe(400)
+      expect(JSON.parse(reply.body)).toMatchObject({
+        ok: false,
+        error: { message: 'unknown sandbox mode' },
+      })
     } finally {
       cleanup()
     }
