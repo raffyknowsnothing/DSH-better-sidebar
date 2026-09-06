@@ -37,8 +37,36 @@ describe('normalizeBrowserUrl', () => {
   it('refuses non-http(s) schemes', () => {
     expect(normalizeBrowserUrl('javascript:alert(1)', SELF)).toEqual({ kind: 'blocked', reason: 'scheme' })
     expect(normalizeBrowserUrl('data:text/html,<b>x</b>', SELF)).toEqual({ kind: 'blocked', reason: 'scheme' })
-    expect(normalizeBrowserUrl('file:///etc/passwd', SELF)).toEqual({ kind: 'blocked', reason: 'scheme' })
     expect(normalizeBrowserUrl('about:blank', SELF)).toEqual({ kind: 'blocked', reason: 'scheme' })
+  })
+
+  it('routes a local file path to the previewer instead of mangling or refusing it', () => {
+    // Bare POSIX path: used to fall through to the bare-host branch and
+    // become "https://Users/me/proj/index.html".
+    expect(normalizeBrowserUrl('/Users/me/proj/index.html', SELF)).toEqual({
+      kind: 'local-file', path: '/Users/me/proj/index.html',
+    })
+    // Bare Windows drive path: "C:" parses as an unknown scheme, so this
+    // used to become "https://C:\Users\me\a.html".
+    expect(normalizeBrowserUrl('C:\\Users\\me\\a.html', SELF)).toEqual({
+      kind: 'local-file', path: 'C:\\Users\\me\\a.html',
+    })
+    // Bare UNC path.
+    expect(normalizeBrowserUrl('\\\\server\\share\\a.html', SELF)).toEqual({
+      kind: 'local-file', path: '\\\\server\\share\\a.html',
+    })
+    // Explicit file: URL, POSIX and Windows-drive forms. `file:` used to be
+    // an unconditional FORBIDDEN_SCHEMES refusal.
+    expect(normalizeBrowserUrl('file:///etc/passwd', SELF)).toEqual({
+      kind: 'local-file', path: '/etc/passwd',
+    })
+    expect(normalizeBrowserUrl('file:///C:/Users/me/a.html', SELF)).toEqual({
+      kind: 'local-file', path: 'C:/Users/me/a.html',
+    })
+    // Percent-encoded file: URL path segments are decoded.
+    expect(normalizeBrowserUrl('file:///Users/me/my%20project/a.html', SELF)).toEqual({
+      kind: 'local-file', path: '/Users/me/my project/a.html',
+    })
   })
 
   it('returns the exact authority needed to trust each loopback URL', () => {

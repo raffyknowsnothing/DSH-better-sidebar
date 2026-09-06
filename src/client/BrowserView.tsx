@@ -24,7 +24,7 @@ import {
   IconWarningOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { VscLinkExternal } from 'react-icons/vsc'
-import { api } from './api.ts'
+import { api, ensureHtmlTicket, htmlUrl } from './api.ts'
 import {
   embeddabilityOf,
   isAllowedLoopbackUrl,
@@ -86,7 +86,7 @@ export function iframeSandboxFor(url: string | undefined, allowedLoopback: strin
 }
 
 export function BrowserView(props: TabComponentProps) {
-  const { store, tab } = props
+  const { store, tab, scope } = props
   const subscribe = useCallback((listener: () => void) => store.subscribe(listener), [store])
   const getSnapshot = useCallback(() => store.getSnapshot(), [store])
   const prefs = useSyncExternalStore(subscribe, getSnapshot, getSnapshot).prefs
@@ -114,15 +114,31 @@ export function BrowserView(props: TabComponentProps) {
       : null,
   )
   const [trustingLocal, setTrustingLocal] = useState(false)
-  /** Address-bar navigation history (in-frame clicks are not tracked). */
-  const [history, setHistory] = useState<string[]>(url !== undefined ? [url] : [])
-  const [cursor, setCursor] = useState<number>(url !== undefined ? 0 : -1)
+  // A local-file entry stores the RAW path here (not the resolved preview
+  // URL, which is ticket-bound and would go stale across a host restart) so
+  // re-visiting it, via reload or history, always re-resolves against the
+  // current ticket and sandbox state.
+  const [history, setHistory] = useState<string[]>(
+    url !== undefined ? [url] : initialNavigation?.kind === 'local-file' ? [initialNavigation.path] : [],
+  )
+  const [cursor, setCursor] = useState<number>(
+    url !== undefined || initialNavigation?.kind === 'local-file' ? 0 : -1,
+  )
   /** Bumped on reload to remount the iframe (also remounts on sandbox flip). */
   const [reloadKey, setReloadKey] = useState(0)
   /** TEMPORARY sandbox unlock for THIS surface only (never writes the global
    *  side card setting; lasts until the tab unmounts or the user restores). */
   const [localUnlock, setLocalUnlock] = useState(false)
   const noSandbox = prefs.browserNoSandbox === true || localUnlock
+  // The raw path of the local file currently open, or undefined for a
+  // normal browsed URL. Tracked apart from `url` because the preview URL is
+  // ticket- and sandbox-mode-bound (html-route.ts: "the sandbox mode rides
+  // the URL path") — flipping the sandbox toggle must rebuild it, not just
+  // re-flag the existing one, or the toggle does nothing (the bug 5f7bea9
+  // fixed for the file-tree previewer, here for the browser tab's own copy).
+  const [localFilePath, setLocalFilePath] = useState<string | undefined>(
+    initialNavigation?.kind === 'local-file' ? initialNavigation.path : undefined,
+  )
   /** A site that refuses to be embedded (X-Frame-Options / frame-ancestors):
    *  the probe verdict shown instead of the blank iframe. */
   const [embedBlocked, setEmbedBlocked] = useState<string | null>(null)
@@ -149,13 +165,36 @@ export function BrowserView(props: TabComponentProps) {
     return () => { cancelled = true }
   }, [url])
 
+  // Resolve (or re-resolve) the preview URL whenever the open local file or
+  // the sandbox toggle changes: the URL's mode segment must name the CURRENT
+  // sandbox state, so a toggle flip has to rebuild it, not just relabel the
+  // existing one. Also runs once on mount for a tab restored onto a local
+  // file. A failed ticket fetch (host restarted mid-session, say) reports
+  // itself rather than leaving a dead iframe.
+  useEffect(() => {
+    if (localFilePath === undefined) return
+    let cancelled = false
+    void ensureHtmlTicket().then((ticket) => {
+      if (cancelled) return
+      setUrl(`${window.location.origin}${htmlUrl(ticket, scope, localFilePath, !noSandbox)}`)
+    }).catch(() => {
+      if (!cancelled) { setUrl(undefined); setMessage(t('browserInvalid')) }
+    })
+    return () => { cancelled = true }
+  }, [localFilePath, noSandbox, scope])
+
   const persist = (nextUrl: string): void => {
     let host = nextUrl
     try { host = new URL(nextUrl).hostname } catch { /* keep the URL as title */ }
     store.reduce(state => patchTab(state, tab.id, { path: nextUrl, title: host }))
   }
 
-  const showRefusal = (result: Exclude<BrowserNavigateResult, { kind: 'ok' }>): void => {
+  /** Basename shown as the tab title while a local file is open. */
+  const localFileTitle = (path: string): string =>
+    path.split(/[\\/]+/).filter(segment => segment !== '').pop() ?? path
+
+  const showRefusal = (result: Exclude<BrowserNavigateResult, { kind: 'ok' | 'local-file' }>): void => {
+    setLocalFilePath(undefined)
     if (result.kind === 'blocked' && result.reason === 'loopback') {
       setInput(result.url)
       setMessage(null)
@@ -167,6 +206,7 @@ export function BrowserView(props: TabComponentProps) {
   }
 
   const commitNavigation = (next: string): void => {
+    setLocalFilePath(undefined)
     setUrl(next)
     setInput(next)
     setMessage(null)
@@ -178,10 +218,30 @@ export function BrowserView(props: TabComponentProps) {
     persist(next)
   }
 
+  /** Open a local file through the HTML previewer route (html-route.ts) —
+   *  the resolution effect above does the actual URL build. `pushHistory` is
+   *  false when re-visiting an existing entry (back/forward) so the stack
+   *  does not grow. */
+  const loadLocalFile = (rawPath: string, pushHistory: boolean): void => {
+    setInput(rawPath)
+    setMessage(null)
+    setPendingLocal(null)
+    if (pushHistory) {
+      setHistory(previous => [...previous.slice(0, cursor + 1), rawPath])
+      setCursor(previous => previous + 1)
+    }
+    store.reduce(state => patchTab(state, tab.id, { path: rawPath, title: localFileTitle(rawPath) }))
+    setLocalFilePath(rawPath)
+  }
+
   const navigateTo = (raw: string): void => {
     const result = normalizeBrowserUrl(raw, window.location.origin, prefs.browserAllowedLoopback)
     if (result.kind === 'ok') {
       commitNavigation(result.url)
+      return
+    }
+    if (result.kind === 'local-file') {
+      loadLocalFile(result.path, true)
       return
     }
     showRefusal(result)
@@ -207,11 +267,16 @@ export function BrowserView(props: TabComponentProps) {
     if (raw === undefined) return
     const result = normalizeBrowserUrl(raw, window.location.origin, prefs.browserAllowedLoopback)
     setCursor(nextCursor)
+    if (result.kind === 'local-file') {
+      loadLocalFile(result.path, false)
+      return
+    }
     if (result.kind !== 'ok') {
       setUrl(undefined)
       showRefusal(result)
       return
     }
+    setLocalFilePath(undefined)
     setUrl(result.url)
     setInput(result.url)
     setPendingLocal(null)

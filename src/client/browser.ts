@@ -22,6 +22,10 @@ export type BrowserNavigateResult =
   | { kind: 'blocked'; reason: 'scheme' }
   | { kind: 'blocked'; reason: 'loopback'; url: string; authority: string }
   | { kind: 'invalid' }
+  /** A local filesystem path (typed bare, or as a `file:` URL): the caller
+   *  resolves this through the HTML previewer route instead (html-route.ts),
+   *  the same server-side workspace fence a file-tree double-click uses. */
+  | { kind: 'local-file'; path: string }
 
 /** One browser.probe wire result (host fetch of the target's headers). */
 export interface BrowserProbeResult {
@@ -83,6 +87,45 @@ const FORBIDDEN_SCHEMES = new Set([
   'mailto', 'tel', 'ftp', 'ftps', 'ws', 'wss', 'sftp', 'ssh',
   'chrome', 'chrome-extension', 'moz-extension', 'edge', 'opera', 'resource', 'view-source',
 ])
+
+/** A POSIX absolute path (single leading slash; a double slash is the UNC
+ *  marker below, not a plain absolute path). */
+const POSIX_ABSOLUTE_PATH = /^\/(?!\/)/
+/** A Windows drive path (`C:\...` or `C:/...`). */
+const WINDOWS_DRIVE_PATH = /^[a-zA-Z]:[\\/]/
+/** A UNC path (`\\server\share\...` or `//server/share/...`). */
+const UNC_PATH = /^[\\/]{2}[^\\/]/
+
+/**
+ * The filesystem path an address-bar input names, in the form
+ * html-route.ts's `encodeHtmlUrl` expects (leading slash for POSIX, bare
+ * drive letter for Windows, `//`/`\\` prefix for UNC) — or undefined when
+ * the input is not a local path at all. Recognizes both a path typed bare
+ * (no scheme parses, or a Windows drive letter that LOOKS like a scheme) and
+ * an explicit `file:` URL.
+ */
+function localFilePathOf(trimmed: string): string | undefined {
+  if (POSIX_ABSOLUTE_PATH.test(trimmed) || WINDOWS_DRIVE_PATH.test(trimmed) || UNC_PATH.test(trimmed)) {
+    return trimmed
+  }
+  if (!/^file:/i.test(trimmed)) return undefined
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return undefined
+  }
+  if (parsed.protocol !== 'file:') return undefined
+  let path: string
+  try {
+    path = decodeURIComponent(parsed.pathname)
+  } catch {
+    return undefined
+  }
+  // file:///C:/Users/... parses to pathname "/C:/Users/...": drop the
+  // leading slash so the drive letter rides bare, as encodeHtmlUrl expects.
+  return /^\/[a-zA-Z]:/.test(path) ? path.slice(1) : path
+}
 
 function normalizedHostname(hostname: string): string {
   return hostname.replace(/^\[|\]$/g, '').toLowerCase()
@@ -166,6 +209,11 @@ export function addAllowedLoopbackUrl(allowlist: string, url: string): string {
 export function normalizeBrowserUrl(input: string, selfOrigin: string, allowedLoopback = ''): BrowserNavigateResult {
   const trimmed = input.trim()
   if (trimmed === '') return { kind: 'invalid' }
+  // A local path, bare or as a file: URL, is caught before scheme handling:
+  // a Windows drive letter ("C:\...") parses as an unknown scheme below, and
+  // file: is a FORBIDDEN_SCHEMES entry that would otherwise be blocked.
+  const localPath = localFilePathOf(trimmed)
+  if (localPath !== undefined) return { kind: 'local-file', path: localPath }
   // Distinguish an explicit scheme from a bare host:port. "example.com:8080"
   // would match a naive scheme regex (dots are legal in schemes), so a
   // scheme prefix is only honored when it is http(s) or a known-forbidden
