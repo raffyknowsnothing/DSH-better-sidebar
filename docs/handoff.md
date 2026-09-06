@@ -48,10 +48,16 @@ Proven:
 - The desktop fix is verified in the app by Raf: the preview now loads. That is the only
   confirmation of the desktop change against a running app; its own 1080 unit tests also pass.
 
+Also proven:
+
+- The sandbox toggle fix (`5f7bea9`) works in the running app: Raf clicked "Temporarily disable
+  (unsafe)" and the preview stayed up. First real click it's had.
+
 Not proven:
 
-- The sandbox toggle fix (`5f7bea9`) has never been exercised in the running app. Unit tests cover
-  the URL mode segment and the conditional CSP header; nobody has clicked the button.
+- The local-file browser-tab routing (`31100b8`) hasn't been clicked in the app yet, only unit
+  tested. Same route as the sandbox toggle above, so it's likely fine, but nobody's typed a bare
+  path into the address bar for real.
 - Whether Raf's budget app actually works unsandboxed. Dropping the sandbox restores storage,
   because the page gets the GUI's origin. It does **not** make a fetch to a backend on another
   port work; that is still cross-origin and needs CORS. Say so rather than promising it.
@@ -62,11 +68,11 @@ Not proven:
    call `usablePersistence(ctx)` from `src/session-persistence.ts`; `src/index.ts`'s
    `persistedCwdOf` collapsed onto the same helper. One guard, not two. 1209 unit tests pass (was
    1208; the browser-tab fix below added one), typecheck clean, plugin rebuilt.
-2. **Verify in the app.** Still open, and only Raf can do it: reload the page, open an HTML file,
-   press "Temporarily disable (unsafe)" on the sandbox row, confirm the preview loads in both
-   modes. Nobody has clicked the button yet.
-3. **Push both repos.** About to happen this session. If a later agent reads this and it's still
-   unpushed, something interrupted it, ask Raf.
+2. ~~Verify in the app.~~ **Done.** Raf clicked "Temporarily disable (unsafe)" and the preview
+   held. The local-file routing (item 4) hasn't had its own click yet — same route, so low risk,
+   but worth a real test the next time someone's in there.
+3. ~~Push both repos.~~ **Done.** Sidebar at `31100b8`+docs, desktop at `b14db08b81`. Both on
+   `origin`/`fork` (Raf's own forks), not `upstream`.
 4. ~~Browser tab turns an html path into an http address.~~ **Done, by Raf's decision** (route to
    the preview, don't refuse). `normalizeBrowserUrl` in `src/client/browser.ts` now recognizes a
    bare POSIX path, a Windows drive path, a UNC path, and an explicit `file:` URL, and returns a
