@@ -30,9 +30,9 @@ import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type {
   Context,
   SidebarAgentPresetsService,
-  SidebarSessionPersistenceService,
   SidebarSessionTitleService,
 } from './context-types.ts'
+import { usablePersistence } from './session-persistence.ts'
 import {
   boundaryDelivered,
   buildSidechatInheritance,
@@ -112,7 +112,7 @@ async function composePersistedSetup(
   ctx: Context,
   childId: string,
 ): Promise<AgentSetup> {
-  const persistence = ctx.get('sessionPersistence') as SidebarSessionPersistenceService | undefined
+  const persistence = usablePersistence(ctx)
   if (persistence === undefined) {
     return () => Promise.resolve()
   }
@@ -178,7 +178,7 @@ async function threadLogEvents(ctx: Context, childId: string): Promise<readonly 
   if (agent !== undefined) {
     return agent.session.events as unknown as readonly SidechatLogEvent[]
   }
-  const persistence = ctx.get('sessionPersistence') as SidebarSessionPersistenceService | undefined
+  const persistence = usablePersistence(ctx)
   if (persistence === undefined) {
     throw new SidebarError('sidechat-error', 'the session persistence service is unavailable', 503)
   }
@@ -371,7 +371,7 @@ export function buildSidechatApi(ctx: Context): SidechatRoutes {
         }
       }
       // Cold thread: only the persisted preset is worth reading back.
-      const persistence = ctx.get('sessionPersistence') as SidebarSessionPersistenceService | undefined
+      const persistence = usablePersistence(ctx)
       if (persistence !== undefined) {
         try {
           const inspected = await persistence.inspect(childId)

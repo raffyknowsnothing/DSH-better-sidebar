@@ -38,6 +38,7 @@ import { extractFrameAncestors } from './browser-probe.ts'
 import { isTrustedApiRequest, isTrustedHostRequest, isLoopbackHostname } from './trust-fence.ts'
 import { htmlTicketOfProcess, isValidHtmlTicket } from './html-ticket.ts'
 import { registerBundleRoute } from './bundle-route.ts'
+import { usablePersistence } from './session-persistence.ts'
 import { launchExternal } from './open-external.ts'
 import * as git from './git.ts'
 import { SettingsConflictError } from '@deepseek-ai/dsh-settings'
@@ -168,19 +169,39 @@ async function sessionCwdOf(ctx: Context, sessionId: string, clientCwd?: string)
       throw new SidebarError('bad-request', `invalid working directory "${clientCwd}"`)
     }
   }
-  const persistence = ctx.get('sessionPersistence')
-  if (persistence !== undefined) {
-    const inspected = await persistence.inspect(sessionId)
-    const metaCwd = inspected.meta.cwd
-    if (metaCwd !== undefined && metaCwd !== '') {
-      try {
-        return requireAbsolute(metaCwd)
-      } catch {
-        throw new SidebarError('bad-request', `invalid working directory "${metaCwd}"`)
-      }
+  // The persistence face is structural and optional, and hosts have shipped
+  // it in more than one shape: DSH Desktop mounts a `sessionPersistence`
+  // value with no `inspect` at all, which used to throw
+  // "persistence.inspect is not a function" out of every detached request as
+  // an opaque `internal` error. This is a best-effort lookup behind two other
+  // sources, so a host that cannot answer must fall through to the cwd
+  // fallback rather than fail the request.
+  const metaCwd = await persistedCwdOf(ctx, sessionId)
+  if (metaCwd !== undefined) {
+    try {
+      return requireAbsolute(metaCwd)
+    } catch {
+      throw new SidebarError('bad-request', `invalid working directory "${metaCwd}"`)
     }
   }
   return process.cwd()
+}
+
+/**
+ * The cwd the persistence index holds for a cold session, or undefined when
+ * this host has no usable persistence face. Never throws: a missing service,
+ * a service without `inspect`, and a rejected lookup are all "no answer".
+ */
+async function persistedCwdOf(ctx: Context, sessionId: string): Promise<string | undefined> {
+  const persistence = usablePersistence(ctx)
+  if (persistence === undefined) return undefined
+  try {
+    const inspected = await persistence.inspect(sessionId)
+    const cwd = inspected?.meta?.cwd
+    return cwd !== undefined && cwd !== '' ? cwd : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** Optional repository selected by the Git panel when cwd is a container. */
